@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Cube Telemetry</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    /* CSS: Makes it look like a clean mobile app */
+    body { font-family: Arial, sans-serif; background-color: #121212; color: #ffffff; text-align: center; margin: 0; padding: 20px; }
+    .card { background-color: #1e1e1e; border-radius: 10px; padding: 15px; margin-bottom: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+    h2 { margin-top: 0; color: #4CAF50; }
+    .telemetry-data { font-size: 24px; font-weight: bold; color: #03A9F4; }
+    input[type=range] { width: 90%; margin: 15px 0; }
+    button { background-color: #4CAF50; color: white; border: none; padding: 15px 30px; margin: 5px; border-radius: 5px; font-size: 18px; cursor: pointer; }
+    .btn-danger { background-color: #f44336; }
+    #status { font-size: 14px; color: #ffeb3b; }
+  </style>
+</head>
+<body>
+
+  <h1>Cube Controller</h1>
+  <p id="status">Connecting to Robot...</p>
+
+  <div class="card">
+    <h2>Telemetry</h2>
+    <p>Pitch Angle: <span id="pitch" class="telemetry-data">0.0</span>&deg;</p>
+    <p>Motor A RPM: <span id="motor_a" class="telemetry-data">0</span></p>
+    <p>Motor B RPM: <span id="motor_b" class="telemetry-data">0</span></p>
+  </div>
+
+  <div class="card">
+    <h2>Robot State</h2>
+    <button onclick="sendState('enable', 1)">Balance (Edge 1)</button>
+    <button class="btn-danger" onclick="sendState('disable', 0)">Disable Motors</button>
+  </div>
+
+  <div class="card">
+    <h2>LQR Tuning</h2>
+    
+    <label for="kp_slider">Kp Weight: <span id="kp_val">1.0</span></label><br>
+    <input type="range" id="kp_slider" min="0" max="10" step="0.1" value="1.0" onchange="sendLQR()"><br>
+
+    <label for="kd_slider">Kd Weight: <span id="kd_val">0.5</span></label><br>
+    <input type="range" id="kd_slider" min="0" max="5" step="0.05" value="0.5" onchange="sendLQR()"><br>
+  </div>
+
+  <script>
+    /* JavaScript: The Brains behind the WebSockets */
+    
+    // Automatically connect to the IP address hosting this page
+    var gateway = `ws://${window.location.hostname}/ws`;
+    var websocket;
+
+    // Run this when the page loads
+    window.addEventListener('load', initWebSocket);
+
+    function initWebSocket() {
+      console.log('Trying to open a WebSocket connection...');
+      websocket = new WebSocket(gateway);
+      websocket.onopen    = onOpen;
+      websocket.onclose   = onClose;
+      websocket.onmessage = onMessage; // Handles incoming telemetry
+    }
+
+    function onOpen(event) {
+      document.getElementById('status').innerText = "🟢 Connected";
+      document.getElementById('status').style.color = "#4CAF50";
+    }
+
+    function onClose(event) {
+      document.getElementById('status').innerText = "🔴 Disconnected - Reconnecting...";
+      document.getElementById('status').style.color = "#f44336";
+      setTimeout(initWebSocket, 2000); // Try to reconnect every 2 seconds
+    }
+
+    // Handle Incoming Telemetry (Robot -> Phone)
+    function onMessage(event) {
+      // Parse the JSON string from the ESP32
+      var data = JSON.parse(event.data);
+      
+      // Update the HTML text elements
+      if (data.angle_x !== undefined) {
+        document.getElementById('pitch').innerText = data.angle_x.toFixed(2);
+      }
+      if (data.motor_speeds !== undefined) {
+        document.getElementById('motor_a').innerText = data.motor_speeds[0];
+        document.getElementById('motor_b').innerText = data.motor_speeds[1];
+      }
+    }
+
+    // Send State Commands (Phone -> Robot)
+    function sendState(actionType, edgeTarget) {
+      var payload = {
+        "command": "set_state",
+        "action": actionType,
+        "target_edge": edgeTarget
+      };
+      websocket.send(JSON.stringify(payload));
+    }
+
+    // Send LQR Tuning Data (Phone -> Robot)
+    function sendLQR() {
+      // Get current slider values
+      var kp = parseFloat(document.getElementById('kp_slider').value);
+      var kd = parseFloat(document.getElementById('kd_slider').value);
+      
+      // Update the text labels next to the sliders
+      document.getElementById('kp_val').innerText = kp;
+      document.getElementById('kd_val').innerText = kd;
+
+      // Pack into JSON and send
+      var payload = {
+        "command": "set_weights",
+        "controller": "LQR",
+        "weights": [kp, kd, 0.0, 0.0] // Expand this array as you add more sliders
+      };
+      
+      websocket.send(JSON.stringify(payload));
+    }
+  </script>
+</body>
+</html>
