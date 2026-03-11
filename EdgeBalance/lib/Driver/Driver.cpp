@@ -72,7 +72,7 @@ void Driver::begin(SPIClass* spiBus) {
     _motor.linkDriver(&_driver);
     _motor.linkCurrentSense(&_currentSense);
 
-    _motor.torque_controller = TorqueControlType::voltage;
+    _motor.torque_controller = TorqueControlType::estimated_current;
     _motor.controller = MotionControlType::torque;
 
     _motor.phase_resistance = _config.R;

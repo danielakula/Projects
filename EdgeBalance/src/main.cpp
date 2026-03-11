@@ -4,10 +4,8 @@
 #include "VoltageMonitor.h"
 #include "IMU.h"
 #include "LQR.h"
-#include "WebDashboard.h"
-#include "InterchipComms.h"
 #include <atomic>
-#include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
 // Thread-safe mailboxes between Core 0 and Core 1
 std::atomic<float> shared_target_torque(0.0f);
@@ -19,10 +17,8 @@ volatile std::atomic<bool> spiRequested(false);
 volatile std::atomic<bool> spiSafeToUse(false);
 
 SPIClass hwSpi(1);
-HardwareSerial uartLink(1); 
 Driver motor1(Motor1Pins, MotorTuning); 
 VoltageMonitor battery(VSENSE_PIN, VSENSE_DIVIDER_RATIO, VSENSE_TRIM);
-InterchipComms comms(uartLink, MASTER_RX, MASTER_TX); 
 
 float target = 0.0f;
 
@@ -31,7 +27,10 @@ float wheel_velocity_integral = 0.0f;
 
 // Outer Loop PI Gains (Start very small!)
 float Kp_outer = 0.003f; 
-float Ki_outer = 0.0005f;
+float Ki_outer = 0.0001f;
+
+unsigned long startTime = 0;
+bool isLogging = false;
 
 // Instantiate globally with your specific SPI pins
 IMU_Sensor imu(ISM_CS, &hwSpi);
@@ -43,7 +42,7 @@ Commander command = Commander(Serial);
 void taskFOC(void * pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(500));
     // 1. Assassinate the Watchdog on Core 1 so we never have to yield!
-    disableCore1WDT(); 
+    //disableCore1WDT(); 
 
     // 2. Set this specific task to the highest possible FreeRTOS priority
     vTaskPrioritySet(NULL, configMAX_PRIORITIES - 1);
@@ -81,6 +80,14 @@ void onKiOuter(char* cmd) {
     Serial.printf("Ki_outer set to: %.6f\n", Ki_outer);
 }
 
+void onStartLogging(char* cmd) {
+    if (!isLogging) {
+        isLogging = true;
+        startTime = millis(); 
+        Serial.println("Time_ms,Angle,BodyVel,TargetAngle,TargetCurrent,WheelVel,MeasuredCurrent");
+    }
+}
+
 void taskLQR(void *pvParameters) {
     uint32_t currentFaults = FAULT_NONE;
     static uint32_t lastFaults = 0xFFFFFFFF; 
@@ -95,13 +102,6 @@ void taskLQR(void *pvParameters) {
 
         if (battery.isUnderVoltage(BATTERY_SAFE_MIN)) currentFaults |= FAULT_UNDER_VOLTAGE;
         if (battery.isOverVoltage(BATTERY_SAFE_MAX))  currentFaults |= FAULT_OVER_VOLTAGE;
-        if (!comms.isConnectionAlive(15))             currentFaults |= FAULT_COMMS_LOST;
-
-        comms.update(); 
-        if (Serial.available()) {
-            userTargetCurrent = Serial.parseFloat(); 
-            while(Serial.available()) { Serial.read(); } 
-        }
 
         command.run();
 
@@ -117,8 +117,6 @@ void taskLQR(void *pvParameters) {
 
         // 3. We now have 100% exclusive, safe access to the SPI hardware!
         if (motor1.hasHardwareFault()) currentFaults |= FAULT_DRV1;
-
-        currentFaults |= comms.getRemoteFaultCode(); 
         
         // State Machine (emergencyStop/enable might send SPI commands to the DRV chip)
         if (currentFaults != lastFaults) {
@@ -136,6 +134,7 @@ void taskLQR(void *pvParameters) {
         spiRequested.store(false);
         
         float current_wheel_vel = shared_motor_velocity.load();
+        float current_iq = shared_motor_iq.load();
         
         // ==========================================
         // OUTER LOOP: Shift target angle based on wheel speed
@@ -164,8 +163,6 @@ void taskLQR(void *pvParameters) {
             wheel_velocity_integral = 0.0f;
         }
 
-        comms.sendPacket(userTargetCurrent, currentFaults);
-
         // ==========================================
         // INNER LOOP: Standard LQR
         // ==========================================
@@ -176,7 +173,7 @@ void taskLQR(void *pvParameters) {
                 // Compute LQR, but calculate Theta ERROR relative to our new target!
                 float theta_error = imu.getPitch() - target_angle;
                 
-                    target = -lqr.compute(
+                target = -lqr.compute(
                     theta_error,            // x1: Angle ERROR
                     imu.getPitchRate(),     // x2: Cube Velocity
                     current_wheel_vel,      // x3: Wheel Velocity
@@ -202,20 +199,39 @@ void taskLQR(void *pvParameters) {
         shared_target_torque.store(target);
 
         // 3. Telemetry Monitor
-        if (millis() - lastPrintTime >= PRINT_INTERVAL_MS) {
-            lastPrintTime = millis();
-            
-            // Plotter format: "Label1:Value1,Label2:Value2"
-            Serial.printf("Angle:%.2f, PitchRate:%.2f, Target:%.2f, WheelVel:%.2f, Iq:%.2f, Battery:%.2fV\n", 
-                          imu.getPitch()*RAD_TO_DEG, 
-                          imu.getPitchRate(), target, current_wheel_vel, shared_motor_iq.load(), battery.readVoltage());
-        }
         // if (millis() - lastPrintTime >= PRINT_INTERVAL_MS) {
         //     lastPrintTime = millis();
-        //     float safe_iq = shared_motor_iq.load();
-        //     Serial.printf("Batt: %05.2fV | Angle: %05.2f deg | Cube Velocity: %05.2f | Wheel Velocity:%05.1f Iq:%05.2f Target:%05.2f\n",
-        //                   battery.readVoltage(), imu.getPitch(), imu.getPitchRate(), motor1.getVelocity(), motor1.getCurrentQ(), target);
+            
+        //     // Plotter format: "Label1:Value1,Label2:Value2"
+        //     Serial.printf("Angle:%.2f, PitchRate:%.2f, Target:%.2f, WheelVel:%.2f, Iq:%.2f, Battery:%.2fV\n", 
+        //                   imu.getPitch()*RAD_TO_DEG, 
+        //                   imu.getPitchRate(), target, current_wheel_vel, shared_motor_iq.load(), battery.readVoltage());
         // }
+
+        // 2. Handle the Logging
+        if (isLogging) {
+            unsigned long currentTime = millis() - startTime;
+            
+            if (currentTime <= 10000) {
+                // Assemble the entire line into a single, unbreakable text buffer
+                char log_buf[128]; 
+                snprintf(log_buf, sizeof(log_buf), "%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f", 
+                         currentTime, 
+                         imu.getPitch(), 
+                         imu.getPitchRate(), 
+                         target_angle, 
+                         target, 
+                         current_wheel_vel, 
+                         current_iq);
+                
+                // Send the complete string all at once
+                Serial.println(log_buf);
+                
+            } else {
+                isLogging = false; 
+                Serial.println("--- LOGGING COMPLETE ---");
+            }
+        }
         
         // Sleep until exactly 5ms have passed
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -223,7 +239,8 @@ void taskLQR(void *pvParameters) {
 }
 
 void setup() {
-    Serial.begin(115200);
+    Serial.setTxBufferSize(4096);
+    Serial.begin(921600);
     delay(2000); // Wait for Serial to initialize
     Serial.println("\n\n=======================================");
     Serial.println("       BALANCE BOT BOOTING...          ");  
@@ -247,8 +264,12 @@ void setup() {
 
     command.add('P', onKpOuter, "Outer Loop Kp");
     command.add('I', onKiOuter, "Outer Loop Ki");
+    command.add('S', onStartLogging, "Start 10s Logging");
 
-    disableCore0WDT();
+    TaskHandle_t idle_0 = xTaskGetIdleTaskHandleForCPU(0);
+    if(idle_0 != NULL){
+        esp_task_wdt_delete(idle_0);
+    }
 
     // Pin FOC to Core 0 (Priority 5 - Highest)
     xTaskCreatePinnedToCore(taskFOC, "MotorTask", 8192, NULL, 5, NULL, 1);

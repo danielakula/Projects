@@ -15,7 +15,7 @@ LQR::LQR() {
     // FIXED: Safe default. Update this from main.cpp using setCurrentLimit()
     current_limit = MotorTuning.current_limit; 
 
-    friction_comp = 0.0f;
+    friction_comp = 0.1f;
 }
 
 void LQR::setFrictionComp(float comp) {
@@ -42,23 +42,7 @@ void LQR::resetIntegral() {
 
 float LQR::compute(float theta, float theta_dot, float wheel_vel, float dt) {
 
-    if (std::abs(theta) < 0.10f) {
-        xf = (1.0f - xf_alpha) * xf + (xf_alpha * theta);
-    }
-
-    const float MAX_OFFSET = 0.052f;
-    if (xf > MAX_OFFSET) xf = MAX_OFFSET;
-    if (xf < -MAX_OFFSET) xf = -MAX_OFFSET;
-
-    float unbiased_theta = theta - xf;
-
-    wheel_integral += (wheel_vel * dt);
-    
-    // Anti-windup for safety
-    if (wheel_integral > 500.0f) wheel_integral = 500.0f;
-    if (wheel_integral < -500.0f) wheel_integral = -500.0f;
-
-    float u = -(K[1] * unbiased_theta + K[2] * theta_dot + K[3] * wheel_vel ); // + K[4] * wheel_integral;
+    float u = -(K[1] * theta + K[2] * theta_dot + K[3] * wheel_vel ); // + K[4] * wheel_integral;
 
     if (u > 0.001f) {
         u += friction_comp;

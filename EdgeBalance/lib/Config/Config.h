@@ -106,7 +106,7 @@ const MotorConfig MotorTuning = {
     0.537f,   // R (Resistance) 
     0.00018f,  // L (Inductance)
     150.0f, // Bandwidth (Hz)
-    20000.0f, // Driver frequency (Hz)
+    15000.0f, // Driver frequency (Hz)
     14.0f,  // Voltage limit (Volts)
     3.0f    // Current limit (Amps) - Increase this safely when testing torque
 };
